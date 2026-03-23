@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import pkgutil
 from typing import TYPE_CHECKING
 
@@ -12,17 +13,25 @@ if TYPE_CHECKING:
     from nanobot.channels.base import BaseChannel
 
 _INTERNAL = frozenset({"base", "manager", "registry"})
-_ALLOWED_BUILTIN = frozenset({"qq"})
+
+
+def _channel_allowlist() -> set[str] | None:
+    """Optional comma-separated allowlist from env (e.g. 'qq,telegram')."""
+    raw = os.getenv("NANOBOT_CHANNEL_ALLOWLIST", "").strip()
+    if not raw:
+        return None
+    return {item.strip() for item in raw.split(",") if item.strip()}
 
 
 def discover_channel_names() -> list[str]:
-    """Return allowed built-in channel module names by scanning the package (zero imports)."""
+    """Return built-in channel module names by scanning the package (zero imports)."""
     import nanobot.channels as pkg
+    allowlist = _channel_allowlist()
 
     return [
         name
         for _, name, ispkg in pkgutil.iter_modules(pkg.__path__)
-        if name not in _INTERNAL and not ispkg and name in _ALLOWED_BUILTIN
+        if name not in _INTERNAL and not ispkg and (allowlist is None or name in allowlist)
     ]
 
 
@@ -39,8 +48,20 @@ def load_channel_class(module_name: str) -> type[BaseChannel]:
 
 
 def discover_plugins() -> dict[str, type[BaseChannel]]:
-    """Plugins are disabled in QQ-only builds."""
-    return {}
+    """Discover external channel plugins registered via entry_points."""
+    from importlib.metadata import entry_points
+
+    allowlist = _channel_allowlist()
+    plugins: dict[str, type[BaseChannel]] = {}
+    for ep in entry_points(group="nanobot.channels"):
+        if allowlist is not None and ep.name not in allowlist:
+            continue
+        try:
+            cls = ep.load()
+            plugins[ep.name] = cls
+        except Exception as e:
+            logger.warning("Failed to load channel plugin '{}': {}", ep.name, e)
+    return plugins
 
 
 def discover_all() -> dict[str, type[BaseChannel]]:
